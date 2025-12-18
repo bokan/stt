@@ -582,8 +582,9 @@ def main():
     # Check accessibility permissions
     if not check_accessibility_permissions():
         print("\n❌ Accessibility permissions required!")
-        print("   Please grant access in System Settings →")
-        print("   Privacy & Security → Accessibility")
+        print("   Grant access to your TERMINAL APP (iTerm2, Terminal, Warp, etc.)")
+        print("   — not 'stt' or 'python'.")
+        print("\n   System Settings → Privacy & Security → Accessibility")
         print("\n   Then restart this app.")
         sys.exit(1)
 
