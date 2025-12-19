@@ -444,6 +444,8 @@ class STTApp:
     def start_recording(self):
         """Start recording audio from microphone"""
         with self._lock:
+            if self._processing:
+                return
             if self.recording or self._starting:
                 return
             self._starting = True
@@ -540,15 +542,29 @@ class STTApp:
             except Exception as e:
                 print(f"⚠️  Error closing stream: {e}")
 
+    def cancel_transcription(self):
+        """Cancel an in-progress transcription (best-effort)."""
+        with self._lock:
+            if not self._processing:
+                return
+
+        cancel = getattr(self.provider, "cancel", None)
+        if callable(cancel):
+            print("⏹️  Cancelling transcription...")
+            try:
+                cancel()
+            except Exception as e:
+                print(f"⚠️  Error cancelling transcription: {e}")
+
     def save_audio_to_wav(self, audio_data):
         """Save audio data to a temporary WAV file"""
         # Convert float32 to int16
         audio_int16 = (audio_data * 32767).astype(np.int16)
         
-        # Create temp file
-        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        wavfile.write(temp_file.name, SAMPLE_RATE, audio_int16)
-        return temp_file.name
+        # Create temp file and close handle before handing to other libraries
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            wavfile.write(temp_file.name, SAMPLE_RATE, audio_int16)
+            return temp_file.name
     
     def transcribe_audio(self, audio_file_path):
         """Transcribe audio using the configured provider"""
@@ -670,7 +686,7 @@ def main():
     hotkey_name = HOTKEYS[HOTKEY]["name"] if HOTKEY in HOTKEYS else HOTKEY
     print(f"Press [{hotkey_name}] to record, release to transcribe")
     print("Hold LEFT SHIFT while recording to also send Enter")
-    print("Press ESC while recording to cancel, Ctrl+C to quit")
+    print("Press ESC to cancel recording / stuck transcription, Ctrl+C to quit")
     print("=" * 50)
 
     # Initialize provider
@@ -730,6 +746,8 @@ def main():
                     send_enter_flag = False
                     # Cancel recording in background thread to avoid blocking keyboard listener
                     threading.Thread(target=app.cancel_recording, daemon=True).start()
+                else:
+                    threading.Thread(target=app.cancel_transcription, daemon=True).start()
         except Exception as e:
             print(f"⚠️  Error in key press handler: {e}")
             # Reset state on error to prevent stuck keys

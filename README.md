@@ -54,7 +54,7 @@ stt
 |--------|------|
 | Record | Hold **Right Command** (default) |
 | Record + Enter | Hold **Left Shift** while recording |
-| Cancel recording | **ESC** |
+| Cancel recording / stuck transcription | **ESC** |
 | Quit | **Ctrl+C** |
 
 ## Configuration
