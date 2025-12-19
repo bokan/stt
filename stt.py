@@ -7,13 +7,16 @@ Hold Right Command key to record, release to transcribe and type
 import os
 import re
 import sys
+import json
 import tempfile
 import threading
+import queue
+import time
 import subprocess
 import atexit
 import fcntl
 from enum import Enum
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 print("Starting STT...", end="", flush=True)
 
@@ -23,8 +26,6 @@ REPO_URL = "https://api.github.com/repos/bokan/stt/commits/master"
 
 from dotenv import load_dotenv
 import sounddevice as sd
-import numpy as np
-from scipy.io import wavfile
 from pynput import keyboard
 import requests
 
@@ -414,13 +415,214 @@ def select_audio_device():
             print("Please enter a number")
 
 
+class _AudioWorkerClient:
+    _WORKER_STARTUP_TIMEOUT_S = 10
+    _START_TIMEOUT_S = 10
+    _STOP_TIMEOUT_S = 10
+    _CANCEL_TIMEOUT_S = 5
+
+    def __init__(self):
+        self._proc: subprocess.Popen[str] | None = None
+        self._messages: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._reader_thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._next_id = 1
+        self._cleanup_registered = False
+
+    def is_running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def ensure_running(self) -> None:
+        if self.is_running():
+            return
+
+        worker_path = os.path.join(os.path.dirname(__file__), "audio_worker.py")
+        if not os.path.exists(worker_path):
+            raise FileNotFoundError(f"Missing audio worker at {worker_path}")
+
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+
+        self._proc = subprocess.Popen(
+            [sys.executable, "-u", worker_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,  # inherit stderr to avoid pipe deadlocks
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        assert self._proc.stdout is not None
+        self._reader_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._reader_thread.start()
+
+        ready = self._wait_for(lambda m: m.get("type") in {"ready", "error"}, timeout_s=self._WORKER_STARTUP_TIMEOUT_S)
+        if not ready:
+            raise TimeoutError("Audio worker did not become ready in time")
+        if ready.get("type") == "error":
+            raise RuntimeError(ready.get("error") or "Audio worker failed to start")
+
+        if not self._cleanup_registered:
+            atexit.register(self.stop)
+            self._cleanup_registered = True
+
+    def stop(self, force: bool = False) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+
+        try:
+            if not force and proc.poll() is None and proc.stdin is not None:
+                try:
+                    proc.stdin.write(json.dumps({"type": "shutdown"}) + "\n")
+                    proc.stdin.flush()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
+        except Exception:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=2)
+            except Exception:
+                pass
+        finally:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+
+    def start_recording(self, *, device: int | None, sample_rate: int, channels: int) -> None:
+        self.ensure_running()
+        with self._lock:
+            req_id = self._next_id
+            self._next_id += 1
+
+            assert self._proc is not None
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(
+                json.dumps(
+                    {
+                        "type": "start",
+                        "id": req_id,
+                        "device": device,
+                        "sample_rate": sample_rate,
+                        "channels": channels,
+                    }
+                )
+                + "\n"
+            )
+            self._proc.stdin.flush()
+
+            message = self._wait_for(
+                lambda m: m.get("type") in {"started", "error"} and m.get("id") == req_id,
+                timeout_s=self._START_TIMEOUT_S,
+            )
+            if not message:
+                raise TimeoutError("Timed out starting audio recording")
+            if message.get("type") == "error":
+                raise RuntimeError(message.get("error") or "Failed to start recording")
+
+    def stop_recording(self, *, wav_path: str) -> int:
+        self.ensure_running()
+        with self._lock:
+            req_id = self._next_id
+            self._next_id += 1
+
+            assert self._proc is not None
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(json.dumps({"type": "stop", "id": req_id, "wav_path": wav_path}) + "\n")
+            self._proc.stdin.flush()
+
+            message = self._wait_for(
+                lambda m: m.get("type") in {"stopped", "error"} and m.get("id") == req_id,
+                timeout_s=self._STOP_TIMEOUT_S,
+            )
+            if not message:
+                raise TimeoutError("Timed out stopping audio recording")
+            if message.get("type") == "error":
+                raise RuntimeError(message.get("error") or "Failed to stop recording")
+
+            frames = message.get("frames")
+            try:
+                return int(frames or 0)
+            except (TypeError, ValueError):
+                return 0
+
+    def cancel_recording(self) -> None:
+        if not self.is_running():
+            return
+        with self._lock:
+            req_id = self._next_id
+            self._next_id += 1
+
+            assert self._proc is not None
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(json.dumps({"type": "cancel", "id": req_id}) + "\n")
+            self._proc.stdin.flush()
+
+            message = self._wait_for(
+                lambda m: m.get("type") in {"canceled", "error"} and m.get("id") == req_id,
+                timeout_s=self._CANCEL_TIMEOUT_S,
+            )
+            if not message:
+                raise TimeoutError("Timed out cancelling audio recording")
+            if message.get("type") == "error":
+                raise RuntimeError(message.get("error") or "Failed to cancel recording")
+
+    def _read_stdout(self) -> None:
+        assert self._proc is not None
+        assert self._proc.stdout is not None
+        for line in self._proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self._messages.put(json.loads(line))
+            except json.JSONDecodeError:
+                self._messages.put({"type": "stdout", "line": line})
+        self._messages.put({"type": "eof"})
+
+    def _wait_for(self, predicate, timeout_s: int) -> dict[str, Any] | None:
+        deadline = time.time() + timeout_s if timeout_s > 0 else None
+        while True:
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return None
+            else:
+                remaining = None
+
+            try:
+                message = self._messages.get(timeout=remaining)
+            except queue.Empty:
+                return None
+
+            if message.get("type") == "eof":
+                return {"type": "error", "error": "Audio worker exited unexpectedly"}
+
+            if predicate(message):
+                return message
+
+
 class STTApp:
     def __init__(self, device=None, provider=None):
         self.recording = False
-        self.audio_data = []
-        self.stream = None
         self.device = device
         self.provider = provider or get_provider(PROVIDER)
+        self._audio_worker = _AudioWorkerClient()
 
         # Thread synchronization
         self._lock = threading.Lock()
@@ -450,37 +652,23 @@ class STTApp:
                 return
             self._starting = True
             self.recording = True
-            self.audio_data = []
 
         self._set_state(AppState.RECORDING)
         play_sound(SOUND_START)
         print("🎤 Recording...")
 
-        def callback(indata, frames, time, status):
-            if status:
-                print(f"Status: {status}")
-            # Lock-free check is safe here - worst case we miss one chunk
-            if self.recording:
-                self.audio_data.append(indata.copy())
-
         try:
-            stream = sd.InputStream(
-                device=self.device,
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype=np.float32,
-                callback=callback
-            )
-            stream.start()
+            self._audio_worker.start_recording(device=self.device, sample_rate=SAMPLE_RATE, channels=CHANNELS)
             with self._lock:
-                if self.recording:
-                    self.stream = stream
-                else:
+                if not self.recording:
                     # Recording was cancelled while starting
-                    stream.abort()
-                    stream.close()
+                    try:
+                        self._audio_worker.cancel_recording()
+                    except Exception:
+                        self._audio_worker.stop(force=True)
         except Exception as e:
             print(f"❌ Failed to start recording: {e}")
+            self._audio_worker.stop(force=True)
             with self._lock:
                 self.recording = False
             self._set_state(AppState.IDLE)
@@ -489,33 +677,45 @@ class STTApp:
                 self._starting = False
     
     def stop_recording(self):
-        """Stop recording and return audio data"""
+        """Stop recording and return (wav_path, frames)"""
         with self._lock:
             if not self.recording:
-                return None
+                return None, 0
             self.recording = False
-            stream = self.stream
-            self.stream = None
-            audio_data = self.audio_data
-            self.audio_data = []
+            starting = self._starting
 
         play_sound(SOUND_STOP)
         print("⏹️  Stopped recording")
 
-        # Stop stream outside lock to avoid deadlock with audio callback
-        # Use abort() instead of stop() - stop() waits for pending buffers which can hang
-        if stream:
+        if starting:
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                with self._lock:
+                    if not self._starting:
+                        break
+                time.sleep(0.01)
+
+        fd, wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            frames = self._audio_worker.stop_recording(wav_path=wav_path)
+            return wav_path, frames
+        except TimeoutError:
+            print("❌ Audio recording stop timed out. Restarting audio worker...")
+            self._audio_worker.stop(force=True)
             try:
-                stream.abort()  # Immediate termination, no waiting
-                stream.close()
-            except Exception as e:
-                print(f"⚠️  Error closing stream: {e}")
-
-        if not audio_data:
-            return None
-
-        # Concatenate all audio chunks
-        return np.concatenate(audio_data, axis=0)
+                os.unlink(wav_path)
+            except OSError:
+                pass
+            return None, 0
+        except Exception as e:
+            print(f"❌ Failed to stop recording: {e}")
+            self._audio_worker.stop(force=True)
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+            return None, 0
 
     def cancel_recording(self):
         """Cancel recording without processing"""
@@ -526,21 +726,18 @@ class STTApp:
                     self._set_state(AppState.IDLE)
                 return
             self.recording = False
-            stream = self.stream
-            self.stream = None
-            self.audio_data = []
 
         self._set_state(AppState.IDLE)
         play_sound(SOUND_CANCEL)
         print("❌ Recording cancelled")
-
-        # Use abort() instead of stop() - stop() waits for pending buffers which can hang
-        if stream:
-            try:
-                stream.abort()  # Immediate termination, no waiting
-                stream.close()
-            except Exception as e:
-                print(f"⚠️  Error closing stream: {e}")
+        try:
+            self._audio_worker.cancel_recording()
+        except TimeoutError:
+            print("⚠️  Audio cancel timed out. Restarting audio worker...")
+            self._audio_worker.stop(force=True)
+        except Exception as e:
+            print(f"⚠️  Error cancelling audio: {e}")
+            self._audio_worker.stop(force=True)
 
     def cancel_transcription(self):
         """Cancel an in-progress transcription (best-effort)."""
@@ -556,16 +753,6 @@ class STTApp:
             except Exception as e:
                 print(f"⚠️  Error cancelling transcription: {e}")
 
-    def save_audio_to_wav(self, audio_data):
-        """Save audio data to a temporary WAV file"""
-        # Convert float32 to int16
-        audio_int16 = (audio_data * 32767).astype(np.int16)
-        
-        # Create temp file and close handle before handing to other libraries
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-            wavfile.write(temp_file.name, SAMPLE_RATE, audio_int16)
-            return temp_file.name
-    
     def transcribe_audio(self, audio_file_path):
         """Transcribe audio using the configured provider"""
         return self.provider.transcribe(audio_file_path, LANGUAGE, PROMPT)
@@ -621,14 +808,14 @@ class STTApp:
 
         wav_path = None
         try:
-            audio = self.stop_recording()
+            wav_path, frames = self.stop_recording()
 
-            if audio is None or len(audio) < SAMPLE_RATE * 0.5:  # Less than 0.5 seconds
+            if not wav_path:
+                print("⚠️  No audio captured, skipping...")
+            elif frames < int(SAMPLE_RATE * 0.5):  # Less than 0.5 seconds
                 print("⚠️  Recording too short, skipping...")
             else:
                 self._set_state(AppState.TRANSCRIBING)
-                wav_path = self.save_audio_to_wav(audio)
-
                 text = self.transcribe_audio(wav_path)
 
                 if text:
