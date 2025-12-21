@@ -14,6 +14,7 @@ dependencies = [
     "mlx-whisper>=0.4.0",
     "rumps>=0.4.0",
     "watchdog>=3.0.0",
+    "numba>=0.60.0",
 ]
 
 [project.scripts]
