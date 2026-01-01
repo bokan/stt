@@ -27,7 +27,7 @@ REPO_URL = "https://api.github.com/repos/bokan/stt/commits/master"
 
 from dotenv import load_dotenv
 import sounddevice as sd
-from pynput import keyboard
+from pynput import keyboard, mouse
 import requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -1228,9 +1228,27 @@ def main():
             key_pressed = False
             send_enter_flag = False
 
+    def on_click(x, y, button, pressed):
+        nonlocal key_pressed, send_enter_flag
+        if button == mouse.Button.middle:
+            if pressed:
+                if not key_pressed:
+                    key_pressed = True
+                    send_enter_flag = True  # Middle button always sends Enter
+                    threading.Thread(target=app.start_recording, daemon=True).start()
+            else:
+                if key_pressed:
+                    key_pressed = False
+                    send_enter_flag = False
+                    threading.Thread(target=app.process_recording, args=(True,), daemon=True).start()
+
     # Start the keyboard listener in a background thread
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
+
+    # Start the mouse listener for middle button trigger
+    mouse_listener = mouse.Listener(on_click=on_click)
+    mouse_listener.start()
 
     # Config change handler
     def on_config_change(changes: dict):
@@ -1295,6 +1313,7 @@ def main():
     # Cleanup handler
     def cleanup():
         listener.stop()
+        mouse_listener.stop()
         config_watcher.stop()
 
     atexit.register(cleanup)
