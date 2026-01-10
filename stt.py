@@ -295,11 +295,11 @@ def play_sound(sound_path):
     subprocess.Popen(["afplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def save_config(key, value):
+def save_config(key, value, force_global=False):
     """Save a config value to the config file"""
-    # Prefer local .env if it exists, otherwise use global config
+    # Prefer local .env if it exists (for dev mode), otherwise use global config
     local_env = os.path.join(os.getcwd(), ".env")
-    if os.path.exists(local_env):
+    if not force_global and os.path.exists(local_env):
         env_path = local_env
     else:
         os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -338,6 +338,10 @@ def setup_wizard():
     """First-time setup wizard"""
     global GROQ_API_KEY, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER, AUDIO_DEVICE
 
+    # Always save to global config in setup wizard
+    def save(key, value):
+        return save_config(key, value, force_global=True)
+
     print("\n" + "=" * 50)
     print("STT Configuration")
     print("=" * 50)
@@ -359,7 +363,7 @@ def setup_wizard():
     # else keep default
 
     if PROVIDER != default_provider:
-        save_config("PROVIDER", PROVIDER)
+        save("PROVIDER", PROVIDER)
         print(f"Provider set to: {PROVIDER}")
 
     # MLX model selection
@@ -376,7 +380,7 @@ def setup_wizard():
         model_choice = input("Select model [1]: ").strip()
         if model_choice in model_map:
             new_model = model_map[model_choice]
-            save_config("WHISPER_MODEL", new_model)
+            save("WHISPER_MODEL", new_model)
             print(f"Model set to: {new_model}")
 
     # Groq API Key (only if groq provider selected)
@@ -391,7 +395,7 @@ def setup_wizard():
                     if confirm != 'y':
                         api_key = ""
                 if api_key:
-                    save_config("GROQ_API_KEY", api_key)
+                    save("GROQ_API_KEY", api_key)
                     GROQ_API_KEY = api_key
                     print("API key updated")
         else:
@@ -410,7 +414,7 @@ def setup_wizard():
                     if confirm != 'y':
                         continue
                 break
-            save_config("GROQ_API_KEY", api_key)
+            save("GROQ_API_KEY", api_key)
             GROQ_API_KEY = api_key
             print("API key saved")
 
@@ -419,18 +423,18 @@ def setup_wizard():
     if PROVIDER == "parakeet":
         print("\n[Parakeet is English-only, language set to 'en']")
         if LANGUAGE != "en":
-            save_config("LANGUAGE", "en")
+            save("LANGUAGE", "en")
             LANGUAGE = "en"
     else:
         print(f"\nLanguage codes: en, es, de, fr, it, pt, ja, etc.")
         lang = input(f"Language [{default_lang}]: ").strip().lower()
         if lang and lang != default_lang:
-            save_config("LANGUAGE", lang)
+            save("LANGUAGE", lang)
             LANGUAGE = lang
             print(f"Language set to: {lang}")
         elif not lang:
             if not LANGUAGE:
-                save_config("LANGUAGE", "en")
+                save("LANGUAGE", "en")
                 LANGUAGE = "en"
 
     # Hotkey
@@ -439,7 +443,7 @@ def setup_wizard():
     hotkey = input(f"Hotkey [{default_hotkey}]: ").strip().lower()
     if hotkey and hotkey != default_hotkey:
         if hotkey in HOTKEYS:
-            save_config("HOTKEY", hotkey)
+            save("HOTKEY", hotkey)
             HOTKEY = hotkey
             print(f"Hotkey set to: {hotkey}")
         else:
@@ -451,7 +455,7 @@ def setup_wizard():
     current = f" [{default_prompt}]" if default_prompt else ""
     prompt = input(f"Prompt{current}: ").strip()
     if prompt and prompt != default_prompt:
-        save_config("PROMPT", prompt)
+        save("PROMPT", prompt)
         PROMPT = prompt
         print(f"Prompt set")
 
@@ -460,7 +464,7 @@ def setup_wizard():
     sound = input(f"\nEnable audio feedback? [{'Y/n' if SOUND_ENABLED else 'y/N'}]: ").strip().lower()
     if sound in ('y', 'n') and sound != default_sound:
         SOUND_ENABLED = sound == 'y'
-        save_config("SOUND_ENABLED", str(SOUND_ENABLED).lower())
+        save("SOUND_ENABLED", str(SOUND_ENABLED).lower())
         print(f"Sound {'enabled' if SOUND_ENABLED else 'disabled'}")
 
     # Audio device
@@ -501,7 +505,7 @@ def setup_wizard():
                 if matching:
                     new_device_name = matching[0][1]['name']
                     if new_device_name != AUDIO_DEVICE:
-                        save_config("AUDIO_DEVICE", new_device_name)
+                        save("AUDIO_DEVICE", new_device_name)
                         AUDIO_DEVICE = new_device_name
                         print(f"Audio device set to: {new_device_name}")
                 else:
@@ -510,7 +514,7 @@ def setup_wizard():
                 print("Invalid input, keeping current setting")
         elif not AUDIO_DEVICE:
             # Save default device if nothing was configured before
-            save_config("AUDIO_DEVICE", default_device_name)
+            save("AUDIO_DEVICE", default_device_name)
             AUDIO_DEVICE = default_device_name
 
     print("\nConfiguration complete!\n")
