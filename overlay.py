@@ -18,8 +18,9 @@ from AppKit import (
     NSImage,
     NSImageView,
     NSImageScaleProportionallyUpOrDown,
+    NSEvent,
 )
-from Foundation import NSRect, NSPoint, NSSize, NSMakeRect
+from Foundation import NSRect, NSPoint, NSSize, NSMakeRect, NSPointInRect
 
 
 # Overlay dimensions
@@ -234,13 +235,20 @@ class RecordingOverlay:
         if self._window is not None:
             return
 
-        # Get screen dimensions
-        screen = NSScreen.mainScreen()
+        # Find screen containing mouse cursor
+        mouse_loc = NSEvent.mouseLocation()
+        screen = None
+        for s in NSScreen.screens():
+            if NSPointInRect(mouse_loc, s.frame()):
+                screen = s
+                break
+        if screen is None:
+            screen = NSScreen.mainScreen()
         screen_frame = screen.frame()
 
-        # Position: horizontally centered, one third from bottom
-        x = (screen_frame.size.width - PILL_WIDTH) / 2
-        y = screen_frame.size.height / 3 - PILL_HEIGHT / 2
+        # Position: horizontally centered, one third from bottom (relative to screen)
+        x = screen_frame.origin.x + (screen_frame.size.width - PILL_WIDTH) / 2
+        y = screen_frame.origin.y + screen_frame.size.height / 3 - PILL_HEIGHT / 2
 
         frame = NSMakeRect(x, y, PILL_WIDTH, PILL_HEIGHT)
 
@@ -266,6 +274,28 @@ class RecordingOverlay:
         self._window = window
         self._view = view
 
+    def _position_on_mouse_screen(self):
+        """Reposition window to screen containing mouse cursor"""
+        if self._window is None:
+            return
+
+        # Find screen containing mouse cursor
+        mouse_loc = NSEvent.mouseLocation()
+        screen = None
+        for s in NSScreen.screens():
+            if NSPointInRect(mouse_loc, s.frame()):
+                screen = s
+                break
+        if screen is None:
+            screen = NSScreen.mainScreen()
+        screen_frame = screen.frame()
+
+        # Position: horizontally centered, one third from bottom (relative to screen)
+        x = screen_frame.origin.x + (screen_frame.size.width - PILL_WIDTH) / 2
+        y = screen_frame.origin.y + screen_frame.size.height / 3 - PILL_HEIGHT / 2
+
+        self._window.setFrameOrigin_(NSPoint(x, y))
+
     def show(self):
         """Show the overlay"""
         with self._lock:
@@ -275,6 +305,7 @@ class RecordingOverlay:
 
         def _show():
             self._ensure_window()
+            self._position_on_mouse_screen()
             if self._view:
                 self._view._smoothed = [0.0] * BAR_COUNT
                 self._view._shift_held = False
