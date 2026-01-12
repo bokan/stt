@@ -524,7 +524,7 @@ def save_device_to_env(device_name):
     print(f"  (saved to {env_path})")
 
 def select_audio_device():
-    """List and select an audio input device"""
+    """List and select an audio input device. Returns device NAME (not index)."""
     devices = sd.query_devices()
     input_devices = []
 
@@ -536,7 +536,7 @@ def select_audio_device():
     if AUDIO_DEVICE:
         for i, dev in input_devices:
             if dev['name'] == AUDIO_DEVICE:
-                return i
+                return AUDIO_DEVICE  # Return name, not index
         print(f"⚠️  Saved device '{AUDIO_DEVICE}' not found, please select again")
 
     print("\nAvailable input devices:")
@@ -549,7 +549,7 @@ def select_audio_device():
     while True:
         choice = input("\nSelect device number (or press Enter for default): ").strip()
         if choice == "":
-            return None  # Use default
+            return None  # Use system default
         try:
             device_idx = int(choice)
             matching = [(i, d) for i, d in input_devices if i == device_idx]
@@ -559,7 +559,7 @@ def select_audio_device():
                 save = input("Save this device for future use? [y/N]: ").strip().lower()
                 if save == "y":
                     save_device_to_env(device_name)
-                return device_idx
+                return device_name  # Return name, not index
             print("Invalid device number")
         except ValueError:
             print("Please enter a number")
@@ -595,7 +595,7 @@ class _AudioWorkerClient:
         with self._lock:
             self._stop_locked(force=force)
 
-    def start_recording(self, *, device: int | None, sample_rate: int, channels: int) -> None:
+    def start_recording(self, *, device_name: str | None, sample_rate: int, channels: int) -> None:
         with self._lock:
             last_error: Exception | None = None
             for attempt in range(2):
@@ -611,7 +611,7 @@ class _AudioWorkerClient:
                             {
                                 "type": "start",
                                 "id": req_id,
-                                "device": device,
+                                "device_name": device_name,
                                 "sample_rate": sample_rate,
                                 "channels": channels,
                             }
@@ -842,9 +842,9 @@ class STTApp:
     # Maximum time for any operation before we consider it stuck
     _MAX_OPERATION_TIME_S = 300  # 5 minutes
 
-    def __init__(self, device=None, provider=None):
+    def __init__(self, device_name=None, provider=None):
         self.recording = False
-        self.device = device
+        self.device_name = device_name  # Store name, resolve to index at record time
         self.provider = provider or get_provider(PROVIDER)
         self._audio_worker = _AudioWorkerClient()
         self._overlay = get_overlay()
@@ -940,7 +940,7 @@ class STTApp:
         print("🎤 Recording...")
 
         try:
-            self._audio_worker.start_recording(device=self.device, sample_rate=SAMPLE_RATE, channels=CHANNELS)
+            self._audio_worker.start_recording(device_name=self.device_name, sample_rate=SAMPLE_RATE, channels=CHANNELS)
             with self._lock:
                 if not self.recording:
                     # Recording was cancelled while starting
@@ -1227,13 +1227,13 @@ def main():
     provider.warmup()
 
     # Select audio device
-    device = select_audio_device()
-    if device is not None:
-        print(f"\n✓ Using: {sd.query_devices(device)['name']}")
+    device_name = select_audio_device()
+    if device_name is not None:
+        print(f"\n✓ Using: {device_name}")
     else:
         print(f"\n✓ Using default device")
 
-    app = STTApp(device=device, provider=provider)
+    app = STTApp(device_name=device_name, provider=provider)
     app.print_ready_prompt()
     key_pressed = False
     shift_held = False
@@ -1329,15 +1329,8 @@ def main():
             GROQ_API_KEY = changes["GROQ_API_KEY"]
         if "AUDIO_DEVICE" in changes:
             AUDIO_DEVICE = changes["AUDIO_DEVICE"]
-            # Update device for next recording
-            new_device = None
-            if AUDIO_DEVICE:
-                devices = sd.query_devices()
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] > 0 and dev['name'] == AUDIO_DEVICE:
-                        new_device = i
-                        break
-            app.device = new_device
+            # Store name directly; resolved to index at record time
+            app.device_name = AUDIO_DEVICE or None
             print(f"   Audio device: {AUDIO_DEVICE or 'default'}")
         if "LANGUAGE" in changes:
             LANGUAGE = changes["LANGUAGE"]

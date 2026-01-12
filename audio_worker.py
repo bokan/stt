@@ -38,13 +38,20 @@ class Recorder:
         self._waveform_buffer = []
         self._peak_level = 0.01  # Auto-normalizing peak (starts low)
 
-    def start(self, *, device: int | None, sample_rate: int, channels: int) -> None:
+    def start(self, *, device_name: str | None, sample_rate: int, channels: int) -> None:
         if self._recording:
             raise RuntimeError("Already recording")
 
         import time
         import numpy as np
         import sounddevice as sd
+
+        # Resolve device name to index at recording time (handles plug/unplug)
+        device_index = None
+        if device_name:
+            device_index = self._resolve_device(device_name, sd)
+            if device_index is None:
+                raise RuntimeError(f"Audio device '{device_name}' not found")
 
         self._chunks = []
         self._sample_rate = sample_rate
@@ -68,7 +75,7 @@ class Recorder:
                     self._send_waveform(np)
 
         stream = sd.InputStream(
-            device=device,
+            device=device_index,
             samplerate=sample_rate,
             channels=channels,
             dtype=np.float32,
@@ -76,6 +83,13 @@ class Recorder:
         )
         stream.start()
         self._stream = stream
+
+    def _resolve_device(self, name: str, sd) -> int | None:
+        """Resolve device name to current index."""
+        for i, dev in enumerate(sd.query_devices()):
+            if dev['max_input_channels'] > 0 and dev['name'] == name:
+                return i
+        return None
 
     def _send_waveform(self, np) -> None:
         """Calculate and send waveform data with auto-normalization"""
@@ -200,7 +214,7 @@ def main() -> int:
 
             if msg_type == "start":
                 recorder.start(
-                    device=message.get("device"),
+                    device_name=message.get("device_name"),
                     sample_rate=int(message.get("sample_rate") or 16000),
                     channels=int(message.get("channels") or 1),
                 )
