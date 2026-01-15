@@ -23,11 +23,22 @@ from typing import Any, Callable, Optional
 import warnings
 warnings.filterwarnings("ignore", message="resource_tracker:.*semaphore", category=UserWarning)
 
-# Show spinner during slow imports
+# Show spinner during slow imports (with slow-load message after 2s)
+import threading
 from rich.console import Console
 from rich.status import Status
+
 _console = Console()
-with Status("[dim]Loading...[/dim]", console=_console, spinner="dots"):
+_status = Status("[dim]Loading...[/dim]", console=_console, spinner="dots")
+_status.start()
+
+def _slow_load_hint():
+    _status.update("[dim]Loading... first run may take ~30s[/dim]")
+
+_slow_timer = threading.Timer(2.0, _slow_load_hint)
+_slow_timer.start()
+
+try:
     # Version for update checking
     try:
         from importlib.metadata import version as _get_version
@@ -46,7 +57,10 @@ with Status("[dim]Loading...[/dim]", console=_console, spinner="dots"):
     from providers import get_provider
     from menubar import STTMenuBar
     from overlay import get_overlay
-del _console
+finally:
+    _slow_timer.cancel()
+    _status.stop()
+    del _console, _status, _slow_timer, _slow_load_hint
 
 
 class AppState(Enum):
@@ -1120,12 +1134,24 @@ def main():
     provider = None
     init_error = None
     provider_available = False
-    with Status("[dim]Initializing...[/dim]", console=console, spinner="dots"):
-        try:
-            provider = get_provider(PROVIDER)
-            provider_available = provider.is_available()  # This imports heavy modules
-        except ValueError as e:
-            init_error = e
+
+    status = Status("[dim]Initializing...[/dim]", console=console, spinner="dots")
+    status.start()
+
+    def slow_init_hint():
+        status.update("[dim]Initializing... first run may take ~30s[/dim]")
+
+    slow_timer = threading.Timer(2.0, slow_init_hint)
+    slow_timer.start()
+
+    try:
+        provider = get_provider(PROVIDER)
+        provider_available = provider.is_available()  # This imports heavy modules
+    except ValueError as e:
+        init_error = e
+    finally:
+        slow_timer.cancel()
+        status.stop()
 
     if init_error:
         console.print(f"[red]✗[/red] {init_error}")
