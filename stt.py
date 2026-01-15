@@ -19,6 +19,15 @@ import concurrent.futures
 from enum import Enum
 from typing import Any, Callable, Optional
 
+# Show immediate feedback during slow imports
+import sys
+sys.stdout.write("Loading...")
+sys.stdout.flush()
+
+# Suppress multiprocessing semaphore leak warning (benign at exit)
+import warnings
+warnings.filterwarnings("ignore", message="resource_tracker:.*semaphore", category=UserWarning)
+
 # Version for update checking
 try:
     from importlib.metadata import version as _get_version
@@ -37,6 +46,10 @@ from watchdog.events import FileSystemEventHandler
 from providers import get_provider
 from menubar import STTMenuBar
 from overlay import get_overlay
+
+# Clear the loading message
+sys.stdout.write("\r\033[K")
+sys.stdout.flush()
 
 
 class AppState(Enum):

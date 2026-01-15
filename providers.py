@@ -469,26 +469,28 @@ class MLXWhisperProvider(TranscriptionProvider):
     def warmup(self) -> None:
         """Pre-load the model at startup (downloads if needed)"""
         from rich.console import Console
+        from rich.status import Status
         console = Console()
         model_name = self.model.split('/')[-1]
-        console.print(f"[dim]Loading model...[/dim]", end="")
 
         if self._use_worker:
-            try:
-                self._ensure_worker()
-                console.print(f"\r[green]✓[/green] Model: [cyan]{model_name}[/cyan]   ")
-            except Exception as e:
-                console.print(f"\r[red]✗[/red] Failed to load model: {e}")
+            with Status(f"[dim]Loading {model_name}...[/dim]", console=console, spinner="dots"):
+                try:
+                    self._ensure_worker()
+                except Exception as e:
+                    console.print(f"[red]✗[/red] Failed to load model: {e}")
+                    return
+            console.print(f"[green]✓[/green] Model: [cyan]{model_name}[/cyan]")
             return
 
         import mlx_whisper
         from mlx_whisper.transcribe import ModelHolder
         import mlx.core as mx
 
-        # Load into ModelHolder cache so transcribe() reuses it
-        ModelHolder.get_model(self.model, mx.float16)
-        self._mlx_whisper = mlx_whisper
-        console.print(f"\r[green]✓[/green] Model: [cyan]{model_name}[/cyan]   ")
+        with Status(f"[dim]Loading {model_name}...[/dim]", console=console, spinner="dots"):
+            ModelHolder.get_model(self.model, mx.float16)
+            self._mlx_whisper = mlx_whisper
+        console.print(f"[green]✓[/green] Model: [cyan]{model_name}[/cyan]")
 
     def transcribe(self, audio_file_path: str, language: str, prompt: str = None) -> str | None:
         if self._use_worker:
@@ -630,14 +632,17 @@ class ParakeetProvider(TranscriptionProvider):
     def warmup(self) -> None:
         """Pre-load the model at startup (downloads if needed)"""
         from rich.console import Console
+        from rich.status import Status
         console = Console()
         model_name = self.model.split('/')[-1]
-        console.print(f"[dim]Loading model...[/dim]", end="")
-        try:
-            self._ensure_worker()
-            console.print(f"\r[green]✓[/green] Model: [cyan]{model_name}[/cyan]   ")
-        except Exception as e:
-            console.print(f"\r[red]✗[/red] Failed to load model: {e}")
+
+        with Status(f"[dim]Loading {model_name}...[/dim]", console=console, spinner="dots"):
+            try:
+                self._ensure_worker()
+            except Exception as e:
+                console.print(f"[red]✗[/red] Failed to load model: {e}")
+                return
+        console.print(f"[green]✓[/green] Model: [cyan]{model_name}[/cyan]")
 
     def transcribe(self, audio_file_path: str, language: str, prompt: str = None) -> str | None:
         # Parakeet is English-only
