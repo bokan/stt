@@ -54,7 +54,7 @@ class GroqProvider(TranscriptionProvider):
     def transcribe(self, audio_file_path: str, language: str, prompt: str = None) -> str | None:
         import requests
 
-        print("🔄 Transcribing via Groq...")
+        print("Transcribing...")
 
         url = "https://api.groq.com/openai/v1/audio/transcriptions"
         headers = {
@@ -439,7 +439,7 @@ class MLXWhisperProvider(TranscriptionProvider):
         self.model = model or os.environ.get("WHISPER_MODEL", self.DEFAULT_MODEL)
         # Normalize model name if user provides short form
         if self.model and not self.model.startswith("mlx-community/"):
-            if self.model in ("large-v3", "large", "medium", "small", "base", "tiny"):
+            if self.model in ("large-v3", "large-v3-turbo", "large", "medium", "small", "base", "tiny"):
                 self.model = f"mlx-community/whisper-{self.model}-mlx"
         self._mlx_whisper = None
         self._use_worker = True
@@ -468,14 +468,17 @@ class MLXWhisperProvider(TranscriptionProvider):
 
     def warmup(self) -> None:
         """Pre-load the model at startup (downloads if needed)"""
-        print(f"Loading MLX Whisper model ({self.model.split('/')[-1]})...", flush=True)
+        from rich.console import Console
+        console = Console()
+        model_name = self.model.split('/')[-1]
+        console.print(f"[dim]Loading model...[/dim]", end="")
 
         if self._use_worker:
             try:
                 self._ensure_worker()
-                print("Model loaded.")
+                console.print(f"\r[green]✓[/green] Model: [cyan]{model_name}[/cyan]   ")
             except Exception as e:
-                print(f"❌ Failed to start MLX worker: {e}")
+                console.print(f"\r[red]✗[/red] Failed to load model: {e}")
             return
 
         import mlx_whisper
@@ -485,11 +488,11 @@ class MLXWhisperProvider(TranscriptionProvider):
         # Load into ModelHolder cache so transcribe() reuses it
         ModelHolder.get_model(self.model, mx.float16)
         self._mlx_whisper = mlx_whisper
-        print("Model loaded.")
+        console.print(f"\r[green]✓[/green] Model: [cyan]{model_name}[/cyan]   ")
 
     def transcribe(self, audio_file_path: str, language: str, prompt: str = None) -> str | None:
         if self._use_worker:
-            print("🔄 Transcribing...")
+            print("Transcribing...")
             try:
                 self._ensure_worker()
                 assert self._worker is not None
@@ -518,7 +521,7 @@ class MLXWhisperProvider(TranscriptionProvider):
                 print("❌ mlx-whisper not installed. Run: pip install mlx-whisper")
                 return None
 
-        print("🔄 Transcribing...")
+        print("Transcribing...")
 
         try:
             result = self._mlx_whisper.transcribe(
@@ -626,12 +629,15 @@ class ParakeetProvider(TranscriptionProvider):
 
     def warmup(self) -> None:
         """Pre-load the model at startup (downloads if needed)"""
-        print(f"Loading Parakeet model ({self.model.split('/')[-1]})...", flush=True)
+        from rich.console import Console
+        console = Console()
+        model_name = self.model.split('/')[-1]
+        console.print(f"[dim]Loading model...[/dim]", end="")
         try:
             self._ensure_worker()
-            print("Model loaded.")
+            console.print(f"\r[green]✓[/green] Model: [cyan]{model_name}[/cyan]   ")
         except Exception as e:
-            print(f"❌ Failed to start Parakeet worker: {e}")
+            console.print(f"\r[red]✗[/red] Failed to load model: {e}")
 
     def transcribe(self, audio_file_path: str, language: str, prompt: str = None) -> str | None:
         # Parakeet is English-only
@@ -639,7 +645,7 @@ class ParakeetProvider(TranscriptionProvider):
             print(f"❌ Parakeet only supports English. Got: {language}")
             return None
 
-        print("🔄 Transcribing...")
+        print("Transcribing...")
         try:
             self._ensure_worker()
             assert self._worker is not None

@@ -19,8 +19,6 @@ import concurrent.futures
 from enum import Enum
 from typing import Any, Callable, Optional
 
-print("Starting STT...", end="", flush=True)
-
 # Version for update checking
 try:
     from importlib.metadata import version as _get_version
@@ -39,8 +37,6 @@ from watchdog.events import FileSystemEventHandler
 from providers import get_provider
 from menubar import STTMenuBar
 from overlay import get_overlay
-
-print(" ready.", flush=True)
 
 
 class AppState(Enum):
@@ -80,6 +76,7 @@ def check_accessibility_permissions():
 # Config paths
 CONFIG_DIR = os.path.expanduser("~/.config/stt")
 CONFIG_FILE = os.path.join(CONFIG_DIR, ".env")
+INITIALIZED_MARKER = os.path.join(CONFIG_DIR, ".initialized")
 LOCK_FILE = os.path.join(tempfile.gettempdir(), "stt.lock")
 
 # Global lock file handle
@@ -112,6 +109,18 @@ def release_lock():
             os.unlink(LOCK_FILE)
         except OSError:
             pass
+
+
+def is_first_run() -> bool:
+    """Check if this is the first run (no config initialized)"""
+    return not os.path.exists(INITIALIZED_MARKER)
+
+
+def mark_initialized():
+    """Mark that first-run setup is complete"""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(INITIALIZED_MARKER, "w") as f:
+        f.write("")
 
 
 # Load environment variables from .env file (check multiple locations)
@@ -191,7 +200,7 @@ class ConfigWatcher:
                 self._observer.schedule(handler, dir_path, recursive=False)
 
         self._observer.start()
-        print(f"👀 Watching config: {', '.join(self._watched_files)}")
+        # Config watcher started (silent)
 
     def stop(self):
         """Stop watching config files"""
@@ -258,7 +267,7 @@ class ConfigWatcher:
                 changes[key] = new_values[key]
 
         if changes:
-            print(f"🔄 Config changed: {', '.join(changes.keys())}")
+            print(f"Config reloaded: {', '.join(changes.keys())}")
             self._on_config_change(changes)
 
 
@@ -329,193 +338,36 @@ def mask_api_key(key):
 
 
 def setup_wizard():
-    """First-time setup wizard"""
+    """Configuration wizard - uses the onboarding module."""
     global GROQ_API_KEY, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER, AUDIO_DEVICE
 
-    # Always save to global config in setup wizard
+    from onboarding import run_setup
+
     def save(key, value):
-        return save_config(key, value, force_global=True)
+        save_config(key, value, force_global=True)
+        # Update globals
+        if key == "PROVIDER":
+            global PROVIDER
+            PROVIDER = value
+        elif key == "GROQ_API_KEY":
+            global GROQ_API_KEY
+            GROQ_API_KEY = value
+        elif key == "HOTKEY":
+            global HOTKEY
+            HOTKEY = value
+        elif key == "AUDIO_DEVICE":
+            global AUDIO_DEVICE
+            AUDIO_DEVICE = value
 
-    print("\n" + "=" * 50)
-    print("STT Configuration")
-    print("=" * 50)
+    current_config = {
+        "provider": PROVIDER,
+        "model": os.environ.get("WHISPER_MODEL", ""),
+        "groq_api_key": GROQ_API_KEY,
+        "hotkey": HOTKEY,
+        "audio_device": AUDIO_DEVICE,
+    }
 
-    # Provider selection
-    default_provider = PROVIDER or "mlx"
-    provider_defaults = {"mlx": "1", "groq": "2", "parakeet": "3"}
-    print("\nProviders:")
-    print("  [1] mlx      - Local MLX Whisper (Apple Silicon)")
-    print("  [2] groq     - Cloud (fast, requires API key)")
-    print("  [3] parakeet - Local Nvidia Parakeet (Apple Silicon, English-only)")
-    provider_choice = input(f"Select provider [{provider_defaults.get(default_provider, '1')}]: ").strip()
-    provider_changed = False
-    if provider_choice == "1":
-        PROVIDER = "mlx"
-        provider_changed = True
-    elif provider_choice == "2":
-        PROVIDER = "groq"
-        provider_changed = True
-    elif provider_choice == "3":
-        PROVIDER = "parakeet"
-        provider_changed = True
-    # else keep default
-
-    if provider_changed:
-        save("PROVIDER", PROVIDER)
-        print(f"Provider set to: {PROVIDER}")
-
-    # MLX model selection
-    if PROVIDER == "mlx":
-        whisper_model = os.environ.get("WHISPER_MODEL", "")
-        print("\nMLX Whisper models (larger = more accurate, slower):")
-        print("  [1] large-v3 (default, best quality)")
-        print("  [2] large")
-        print("  [3] medium")
-        print("  [4] small")
-        print("  [5] base")
-        print("  [6] tiny (fastest)")
-        model_map = {"1": "large-v3", "2": "large", "3": "medium", "4": "small", "5": "base", "6": "tiny"}
-        model_choice = input("Select model [1]: ").strip()
-        if model_choice in model_map:
-            new_model = model_map[model_choice]
-            save("WHISPER_MODEL", new_model)
-            print(f"Model set to: {new_model}")
-
-    # Groq API Key (only if groq provider selected)
-    if PROVIDER == "groq":
-        if GROQ_API_KEY:
-            masked = mask_api_key(GROQ_API_KEY)
-            print(f"\nCurrent API key: {masked}")
-            api_key = input("Enter new Groq API key (or press Enter to keep): ").strip()
-            if api_key:
-                if not api_key.startswith("gsk_"):
-                    confirm = input("Key doesn't look like a Groq key (should start with 'gsk_'). Use anyway? [y/N]: ").strip().lower()
-                    if confirm != 'y':
-                        api_key = ""
-                if api_key:
-                    save("GROQ_API_KEY", api_key)
-                    GROQ_API_KEY = api_key
-                    print("API key updated")
-        else:
-            print("\nTo use Groq, you need an API key.")
-            print("Get one at: https://console.groq.com")
-            while True:
-                api_key = input("\nEnter your Groq API key (or 'q' to quit): ").strip()
-                if api_key.lower() == 'q':
-                    print("\nSetup cancelled.")
-                    sys.exit(0)
-                if not api_key:
-                    print("API key cannot be empty")
-                    continue
-                if not api_key.startswith("gsk_"):
-                    confirm = input("Key doesn't look like a Groq key (should start with 'gsk_'). Use anyway? [y/N]: ").strip().lower()
-                    if confirm != 'y':
-                        continue
-                break
-            save("GROQ_API_KEY", api_key)
-            GROQ_API_KEY = api_key
-            print("API key saved")
-
-    # Language
-    default_lang = LANGUAGE or "en"
-    if PROVIDER == "parakeet":
-        print("\n[Parakeet is English-only, language set to 'en']")
-        if LANGUAGE != "en":
-            save("LANGUAGE", "en")
-            LANGUAGE = "en"
-    else:
-        print(f"\nLanguage codes: en, es, de, fr, it, pt, ja, etc.")
-        lang = input(f"Language [{default_lang}]: ").strip().lower()
-        if lang and lang != default_lang:
-            save("LANGUAGE", lang)
-            LANGUAGE = lang
-            print(f"Language set to: {lang}")
-        elif not lang:
-            if not LANGUAGE:
-                save("LANGUAGE", "en")
-                LANGUAGE = "en"
-
-    # Hotkey
-    default_hotkey = HOTKEY or "cmd_r"
-    print(f"\nHotkey options: cmd_r, alt_r, ctrl_r, shift_r")
-    hotkey = input(f"Hotkey [{default_hotkey}]: ").strip().lower()
-    if hotkey and hotkey != default_hotkey:
-        if hotkey in HOTKEYS:
-            save("HOTKEY", hotkey)
-            HOTKEY = hotkey
-            print(f"Hotkey set to: {hotkey}")
-        else:
-            print(f"Invalid hotkey, keeping: {default_hotkey}")
-
-    # Prompt
-    default_prompt = PROMPT or ""
-    print(f"\nContext prompt helps recognize specific terms (e.g., Claude, TypeScript, React)")
-    current = f" [{default_prompt}]" if default_prompt else ""
-    prompt = input(f"Prompt{current}: ").strip()
-    if prompt and prompt != default_prompt:
-        save("PROMPT", prompt)
-        PROMPT = prompt
-        print(f"Prompt set")
-
-    # Sound
-    default_sound = "y" if SOUND_ENABLED else "n"
-    sound = input(f"\nEnable audio feedback? [{'Y/n' if SOUND_ENABLED else 'y/N'}]: ").strip().lower()
-    if sound in ('y', 'n') and sound != default_sound:
-        SOUND_ENABLED = sound == 'y'
-        save("SOUND_ENABLED", str(SOUND_ENABLED).lower())
-        print(f"Sound {'enabled' if SOUND_ENABLED else 'disabled'}")
-
-    # Audio device
-    devices = sd.query_devices()
-    input_devices = []
-    for i, dev in enumerate(devices):
-        if dev['max_input_channels'] > 0:
-            input_devices.append((i, dev))
-
-    if input_devices:
-        print("\nAvailable input devices:")
-        default_device_id = sd.default.device[0]
-        default_device_name = devices[default_device_id]['name'] if default_device_id is not None else None
-
-        # Find current device by name
-        current_device_idx = None
-        if AUDIO_DEVICE:
-            for i, dev in input_devices:
-                if dev['name'] == AUDIO_DEVICE:
-                    current_device_idx = i
-                    break
-
-        for i, dev in input_devices:
-            markers = []
-            if i == default_device_id:
-                markers.append("system default")
-            if current_device_idx is not None and i == current_device_idx:
-                markers.append("current")
-            marker_str = f" ({', '.join(markers)})" if markers else ""
-            print(f"  [{i}] {dev['name']}{marker_str}")
-
-        prompt_default = current_device_idx if current_device_idx is not None else default_device_id
-        device_choice = input(f"\nSelect device number [{prompt_default}]: ").strip()
-        if device_choice:
-            try:
-                new_device_idx = int(device_choice)
-                matching = [(i, d) for i, d in input_devices if i == new_device_idx]
-                if matching:
-                    new_device_name = matching[0][1]['name']
-                    if new_device_name != AUDIO_DEVICE:
-                        save("AUDIO_DEVICE", new_device_name)
-                        AUDIO_DEVICE = new_device_name
-                        print(f"Audio device set to: {new_device_name}")
-                else:
-                    print("Invalid device number, keeping current setting")
-            except ValueError:
-                print("Invalid input, keeping current setting")
-        elif not AUDIO_DEVICE:
-            # Save default device if nothing was configured before
-            save("AUDIO_DEVICE", default_device_name)
-            AUDIO_DEVICE = default_device_name
-
-    print("\nConfiguration complete!\n")
+    run_setup(save, current_config=current_config, reconfigure=True)
 
 
 def save_device_to_env(device_name):
@@ -937,7 +789,7 @@ class STTApp:
         self._set_state(AppState.RECORDING)
         self._overlay.show()
         play_sound(SOUND_START)
-        print("🎤 Recording...")
+        print("Recording...")
 
         try:
             self._audio_worker.start_recording(device_name=self.device_name, sample_rate=SAMPLE_RATE, channels=CHANNELS)
@@ -970,7 +822,7 @@ class STTApp:
 
         self._overlay.set_transcribing(True)
         play_sound(SOUND_STOP)
-        print("⏹️  Stopped recording")
+        print("Stopped")
 
         if starting:
             deadline = time.time() + 1.0
@@ -1036,7 +888,7 @@ class STTApp:
 
         cancel = getattr(self.provider, "cancel", None)
         if callable(cancel):
-            print("⏹️  Cancelling transcription...")
+            print("Cancelling...")
             try:
                 cancel()
             except Exception as e:
@@ -1064,8 +916,10 @@ class STTApp:
 
     def print_ready_prompt(self):
         """Print the ready prompt with hotkey name"""
+        from rich.console import Console
+        console = Console()
         hotkey_name = HOTKEYS[HOTKEY]["name"] if HOTKEY in HOTKEYS else HOTKEY
-        print(f"Press [{hotkey_name}] to record")
+        console.print(f"\n[bold green]Ready[/bold green] [dim]│[/dim] Hold [cyan]{hotkey_name}[/cyan] to record, +Shift ↵, Esc ✗")
 
     def transform_text(self, text):
         """Apply text transformations"""
@@ -1079,7 +933,7 @@ class STTApp:
         if not text:
             return
 
-        print(f"⌨️  Typing: {text}" + (" [+Enter]" if send_enter else ""))
+        print(f"Typing: {text}" + (" ↵" if send_enter else ""))
 
         try:
             # Save current clipboard
@@ -1146,9 +1000,9 @@ class STTApp:
                 if text:
                     text = self.transform_text(text)
                     self.type_text(text, send_enter=send_enter)
-                    print(f"✅ Done: {text}")
+                    print(f"✓ {text}")
                 else:
-                    print("⚠️  No transcription returned")
+                    print("No transcription returned")
 
             self.print_ready_prompt()
         except Exception as e:
@@ -1170,45 +1024,92 @@ class STTApp:
 
 
 def main():
+    global GROQ_API_KEY, LANGUAGE, HOTKEY, PROMPT, SOUND_ENABLED, PROVIDER, AUDIO_DEVICE
+
     # Check for --config flag
     if "--config" in sys.argv:
         setup_wizard()
         return
 
+    # Dev flags for testing permission flow
+    if "--test-permissions" in sys.argv:
+        from onboarding import (
+            show_permission_error,
+            open_accessibility_settings,
+            open_input_monitoring_settings,
+            console,
+        )
+        from rich.prompt import Confirm
+        show_permission_error()
+        # Step 1: Accessibility
+        if Confirm.ask("Open Accessibility settings?", default=True):
+            open_accessibility_settings()
+            console.print("\n[dim]Enable the permission, then come back here.[/dim]\n")
+            Confirm.ask("Done with Accessibility?", default=True)
+        # Step 2: Input Monitoring
+        if Confirm.ask("Open Input Monitoring settings?", default=True):
+            open_input_monitoring_settings()
+            console.print("\n[dim]Enable the permission, then come back here.[/dim]\n")
+            Confirm.ask("Done with Input Monitoring?", default=True)
+        from onboarding import get_terminal_app
+        terminal = get_terminal_app()
+        console.print(f"\n[green]Permission setup complete.[/green]")
+        console.print(f"[yellow]Restart {terminal} and run STT again.[/yellow]\n")
+        return
+
     # Ensure only one instance
     if not acquire_lock():
-        print("❌ Another instance of STT is already running")
+        from rich.console import Console
+        Console().print("[red]Another instance of STT is already running[/red]")
         sys.exit(1)
     atexit.register(release_lock)
 
-    print("=" * 50)
-    print("STT - Voice-to-Text for macOS")
-    print("https://github.com/bokan/stt")
-    print("=" * 50)
+    # First-run onboarding
+    if is_first_run():
+        from onboarding import run_first_time_setup
+
+        def save_and_update(key, value):
+            save_config(key, value, force_global=True)
+            # Update global vars
+            if key == "PROVIDER":
+                global PROVIDER
+                PROVIDER = value
+                os.environ["PROVIDER"] = value
+            elif key == "WHISPER_MODEL":
+                os.environ["WHISPER_MODEL"] = value
+            elif key == "HOTKEY":
+                global HOTKEY
+                HOTKEY = value
+                os.environ["HOTKEY"] = value
+            elif key == "AUDIO_DEVICE":
+                global AUDIO_DEVICE
+                AUDIO_DEVICE = value
+                os.environ["AUDIO_DEVICE"] = value
+
+        run_first_time_setup(save_and_update)
+        mark_initialized()
+
+        # Reload config after onboarding
+        load_dotenv(CONFIG_FILE, override=True)
+        PROVIDER = os.environ.get("PROVIDER", "mlx")
+        HOTKEY = os.environ.get("HOTKEY", "cmd_r")
+        AUDIO_DEVICE = os.environ.get("AUDIO_DEVICE", "")
+
+    from rich.console import Console
+    console = Console()
+    console.print()
+    console.print("[bold]STT[/bold] [dim]Voice-to-text for macOS[/dim]")
+    console.print("[dim]https://github.com/bokan/stt[/dim]")
+    console.print()
 
     # Check for updates in background
     threading.Thread(target=check_for_updates, daemon=True).start()
-
-    # Check accessibility permissions
-    if not check_accessibility_permissions():
-        print("\n❌ Accessibility permissions required!")
-        print("   Grant access to your TERMINAL APP (iTerm2, Terminal, Warp, etc.)")
-        print("   — not 'stt' or 'python'.")
-        print("\n   System Settings → Privacy & Security → Accessibility")
-        print("\n   Then restart this app.")
-        sys.exit(1)
-
-    hotkey_name = HOTKEYS[HOTKEY]["name"] if HOTKEY in HOTKEYS else HOTKEY
-    print(f"Press [{hotkey_name}] to record, release to transcribe")
-    print("Hold SHIFT while recording to also send Enter")
-    print("Press ESC to cancel recording / stuck transcription, Ctrl+C to quit")
-    print("=" * 50)
 
     # Initialize provider
     try:
         provider = get_provider(PROVIDER)
     except ValueError as e:
-        print(f"❌ {e}")
+        console.print(f"[red]✗[/red] {e}")
         sys.exit(1)
 
     if not provider.is_available():
@@ -1216,25 +1117,40 @@ def main():
             setup_wizard()
             provider = get_provider(PROVIDER)
         else:
-            print(f"❌ Provider '{PROVIDER}' is not available")
+            console.print(f"[red]✗[/red] Provider '{PROVIDER}' is not available")
             if PROVIDER == "mlx":
-                print("   Install with: pip install mlx-whisper")
+                console.print("  [dim]Install with: pip install mlx-whisper[/dim]")
             sys.exit(1)
 
-    print(f"✓ Provider: {provider.name}")
+    console.print(f"[green]✓[/green] Provider: [cyan]{provider.name}[/cyan]")
 
     # Warmup provider (downloads/loads model if needed)
     provider.warmup()
 
-    # Select audio device
+    # Check accessibility permissions
+    if not check_accessibility_permissions():
+        from onboarding import show_permission_error, open_accessibility_settings, prompt_open_settings, get_terminal_app
+        show_permission_error()
+        if prompt_open_settings():
+            open_accessibility_settings()
+        terminal = get_terminal_app()
+        console.print(f"\n[yellow]Restart {terminal} and run STT again.[/yellow]")
+        sys.exit(1)
+
+    hotkey_name = HOTKEYS[HOTKEY]["name"] if HOTKEY in HOTKEYS else HOTKEY
+
+    # Select audio device (uses saved device or prompts)
     device_name = select_audio_device()
-    if device_name is not None:
-        print(f"\n✓ Using: {device_name}")
+    if device_name:
+        console.print(f"[green]✓[/green] Device: [cyan]{device_name}[/cyan]")
     else:
-        print(f"\n✓ Using default device")
+        console.print(f"[green]✓[/green] Device: [cyan]System default[/cyan]")
+
+    console.print()
+    console.print(f"[bold green]Ready[/bold green] [dim]│[/dim] Hold [cyan]{hotkey_name}[/cyan] to record, +Shift ↵, Esc ✗")
+    console.print()
 
     app = STTApp(device_name=device_name, provider=provider)
-    app.print_ready_prompt()
     key_pressed = False
     shift_held = False
     send_enter_flag = False

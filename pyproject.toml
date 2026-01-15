@@ -18,6 +18,7 @@ dependencies = [
     "parakeet-mlx>=0.5.0",
     "metaphone>=0.6",
     "packaging>=21.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +38,7 @@ source = "vcs"
 version-file = "_version.py"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parakeet_worker.py", "audio_worker.py", "postprocess.py", "overlay.py"]
+only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parakeet_worker.py", "audio_worker.py", "postprocess.py", "overlay.py", "onboarding.py"]
 
 [tool.hatch.build.targets.wheel.sources]
 "stt.py" = "stt.py"
@@ -48,3 +49,4 @@ only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parake
 "audio_worker.py" = "audio_worker.py"
 "postprocess.py" = "postprocess.py"
 "overlay.py" = "overlay.py"
+"onboarding.py" = "onboarding.py"

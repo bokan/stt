@@ -41,10 +41,8 @@ def main() -> int:
         from mlx_whisper.transcribe import ModelHolder
         import mlx.core as mx
 
-        _log(f"[stt:mlx-worker] Loading model: {model}")
         ModelHolder.get_model(model, mx.float16)
         _write_json({"type": "ready"})
-        _log("[stt:mlx-worker] Ready")
     except Exception as e:
         _write_json({"type": "error", "error": f"Failed to initialize MLX Whisper: {e}"})
         _log(traceback.format_exc())
