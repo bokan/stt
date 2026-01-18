@@ -6,6 +6,7 @@ import atexit
 import json
 import os
 import queue
+import select
 import subprocess
 import sys
 import threading
@@ -88,12 +89,16 @@ class GroqProvider(TranscriptionProvider):
 class _MLXWorkerClient:
     _STARTED_TIMEOUT_S = 2
     _HEARTBEAT_TIMEOUT_S = 2.5
+    _WRITE_TIMEOUT_S = 2.0
+    _WRITE_LOCK_TIMEOUT_S = 2.0
+
     def __init__(self, model: str):
         self.model = model
         self._proc: subprocess.Popen[str] | None = None
         self._messages: "queue.Queue[dict[str, Any]]" = queue.Queue()
         self._reader_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._next_id = 1
 
     def is_running(self) -> bool:
@@ -205,22 +210,22 @@ class _MLXWorkerClient:
             req_id = self._next_id
             self._next_id += 1
 
-            assert self._proc is not None
-            assert self._proc.stdin is not None
-            self._proc.stdin.write(
-                json.dumps(
-                    {
-                        "type": "transcribe",
-                        "id": req_id,
-                        "audio_file_path": audio_file_path,
-                        "language": language,
-                        "prompt": prompt,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+            payload = json.dumps(
+                {
+                    "type": "transcribe",
+                    "id": req_id,
+                    "audio_file_path": audio_file_path,
+                    "language": language,
+                    "prompt": prompt,
+                },
+                ensure_ascii=False,
             )
-            self._proc.stdin.flush()
+            if not self._write_lock.acquire(timeout=self._WRITE_LOCK_TIMEOUT_S):
+                raise TimeoutError("Timed out waiting for MLX worker write lock")
+            try:
+                self._write_line(payload + "\n", timeout_s=self._WRITE_TIMEOUT_S)
+            finally:
+                self._write_lock.release()
 
             started_deadline = time.time() + self._STARTED_TIMEOUT_S
             last_heartbeat = time.time()
@@ -281,6 +286,25 @@ class _MLXWorkerClient:
                     if error:
                         raise RuntimeError(str(error))
                     return str(message.get("text") or "").strip()
+
+    def _write_line(self, line: str, timeout_s: float) -> None:
+        assert self._proc is not None
+        assert self._proc.stdin is not None
+        fd = self._proc.stdin.fileno()
+        data = line.encode("utf-8")
+        total = 0
+        deadline = time.time() + timeout_s
+        while total < len(data):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("Timed out writing to MLX worker stdin")
+            _, writable, _ = select.select([], [fd], [], remaining)
+            if not writable:
+                raise TimeoutError("Timed out writing to MLX worker stdin")
+            written = os.write(fd, data[total:])
+            if written <= 0:
+                raise RuntimeError("Failed to write to MLX worker stdin")
+            total += written
 
     def _read_stdout(self, proc: subprocess.Popen[str], messages: "queue.Queue[dict[str, Any]]") -> None:
         assert proc.stdout is not None
@@ -627,6 +651,8 @@ class MLXWhisperProvider(TranscriptionProvider):
     def _stop_worker(self, force: bool = False) -> None:
         with self._worker_lock:
             worker = self._worker
+            if force:
+                self._worker = None
         if worker is None:
             return
         worker.stop(force=force)

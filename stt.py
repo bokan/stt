@@ -16,6 +16,8 @@ import subprocess
 import shutil
 import atexit
 import fcntl
+import select
+from collections import deque
 from enum import Enum
 from typing import Any, Callable, Optional
 from Quartz import (
@@ -455,12 +457,15 @@ class _AudioWorkerClient:
     _START_TIMEOUT_S = 10
     _STOP_TIMEOUT_S = 10
     _CANCEL_TIMEOUT_S = 5
+    _WRITE_TIMEOUT_S = 2.0
+    _WRITE_LOCK_TIMEOUT_S = 2.0
 
     def __init__(self):
         self._proc: subprocess.Popen[str] | None = None
         self._messages: "queue.Queue[dict[str, Any]]" = queue.Queue()
         self._reader_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._next_id = 1
         self._cleanup_registered = False
         self._waveform_callback: Optional[Callable[[list[float], float], None]] = None
@@ -489,21 +494,21 @@ class _AudioWorkerClient:
                     req_id = self._next_id
                     self._next_id += 1
 
-                    assert self._proc is not None
-                    assert self._proc.stdin is not None
-                    self._proc.stdin.write(
-                        json.dumps(
-                            {
-                                "type": "start",
-                                "id": req_id,
-                                "device_name": device_name,
-                                "sample_rate": sample_rate,
-                                "channels": channels,
-                            }
-                        )
-                        + "\n"
+                    payload = json.dumps(
+                        {
+                            "type": "start",
+                            "id": req_id,
+                            "device_name": device_name,
+                            "sample_rate": sample_rate,
+                            "channels": channels,
+                        }
                     )
-                    self._proc.stdin.flush()
+                    if not self._write_lock.acquire(timeout=self._WRITE_LOCK_TIMEOUT_S):
+                        raise TimeoutError("Timed out waiting for audio worker write lock")
+                    try:
+                        self._write_line(payload + "\n", timeout_s=self._WRITE_TIMEOUT_S)
+                    finally:
+                        self._write_lock.release()
 
                     message = self._wait_for_locked(
                         lambda m: m.get("type") in {"started", "error"} and m.get("id") == req_id,
@@ -529,10 +534,13 @@ class _AudioWorkerClient:
             req_id = self._next_id
             self._next_id += 1
 
-            assert self._proc is not None
-            assert self._proc.stdin is not None
-            self._proc.stdin.write(json.dumps({"type": "stop", "id": req_id, "wav_path": wav_path}) + "\n")
-            self._proc.stdin.flush()
+            payload = json.dumps({"type": "stop", "id": req_id, "wav_path": wav_path})
+            if not self._write_lock.acquire(timeout=self._WRITE_LOCK_TIMEOUT_S):
+                raise TimeoutError("Timed out waiting for audio worker write lock")
+            try:
+                self._write_line(payload + "\n", timeout_s=self._WRITE_TIMEOUT_S)
+            finally:
+                self._write_lock.release()
 
             message = self._wait_for_locked(
                 lambda m: m.get("type") in {"stopped", "error"} and m.get("id") == req_id,
@@ -557,10 +565,13 @@ class _AudioWorkerClient:
             req_id = self._next_id
             self._next_id += 1
 
-            assert self._proc is not None
-            assert self._proc.stdin is not None
-            self._proc.stdin.write(json.dumps({"type": "cancel", "id": req_id}) + "\n")
-            self._proc.stdin.flush()
+            payload = json.dumps({"type": "cancel", "id": req_id})
+            if not self._write_lock.acquire(timeout=self._WRITE_LOCK_TIMEOUT_S):
+                raise TimeoutError("Timed out waiting for audio worker write lock")
+            try:
+                self._write_line(payload + "\n", timeout_s=self._WRITE_TIMEOUT_S)
+            finally:
+                self._write_lock.release()
 
             message = self._wait_for_locked(
                 lambda m: m.get("type") in {"canceled", "error"} and m.get("id") == req_id,
@@ -590,6 +601,25 @@ class _AudioWorkerClient:
             except json.JSONDecodeError:
                 messages.put({"type": "stdout", "line": line})
         messages.put({"type": "eof"})
+
+    def _write_line(self, line: str, timeout_s: float) -> None:
+        assert self._proc is not None
+        assert self._proc.stdin is not None
+        fd = self._proc.stdin.fileno()
+        data = line.encode("utf-8")
+        total = 0
+        deadline = time.time() + timeout_s
+        while total < len(data):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("Timed out writing to audio worker stdin")
+            _, writable, _ = select.select([], [fd], [], remaining)
+            if not writable:
+                raise TimeoutError("Timed out writing to audio worker stdin")
+            written = os.write(fd, data[total:])
+            if written <= 0:
+                raise RuntimeError("Failed to write to audio worker stdin")
+            total += written
 
     def _wait_for_locked(self, predicate, timeout_s: int) -> dict[str, Any] | None:
         deadline = time.time() + timeout_s if timeout_s > 0 else None
@@ -726,6 +756,8 @@ class _AudioWorkerClient:
 class STTApp:
     # Maximum time for any operation before we consider it stuck
     _MAX_OPERATION_TIME_S = 300  # 5 minutes
+    _MAX_STARTING_TIME_S = 5
+    _MAX_PROCESSING_TIME_S = 20
 
     def __init__(self, device_name=None, provider=None):
         self.recording = False
@@ -742,6 +774,9 @@ class STTApp:
         self._processing = False  # Guard against concurrent process_recording calls
         self._starting = False  # Guard against concurrent start_recording calls
         self._operation_start_time: Optional[float] = None  # Track when operations start
+        self._starting_since: Optional[float] = None
+        self._processing_since: Optional[float] = None
+        self._event_log = deque(maxlen=200)
 
         # State management for menu bar
         self._state = AppState.IDLE
@@ -766,6 +801,16 @@ class STTApp:
                     if elapsed > self._MAX_OPERATION_TIME_S:
                         print(f"⚠️  Operation stuck for {elapsed:.0f}s, resetting state...")
                         self._force_reset_state_locked()
+                if self._starting_since is not None:
+                    elapsed = time.time() - self._starting_since
+                    if elapsed > self._MAX_STARTING_TIME_S:
+                        print(f"⚠️  Start stuck for {elapsed:.1f}s, resetting state...")
+                        self._force_reset_state_locked()
+                if self._processing_since is not None:
+                    elapsed = time.time() - self._processing_since
+                    if elapsed > self._MAX_PROCESSING_TIME_S:
+                        print(f"⚠️  Processing stuck for {elapsed:.1f}s, resetting state...")
+                        self._force_reset_state_locked()
 
     def _force_reset_state_locked(self):
         """Force reset all state flags (must be called with lock held)"""
@@ -773,6 +818,9 @@ class STTApp:
         self._starting = False
         self.recording = False
         self._operation_start_time = None
+        self._starting_since = None
+        self._processing_since = None
+        self._log_event("force_reset")
         # Hide overlay
         try:
             self._overlay.hide()
@@ -805,19 +853,38 @@ class STTApp:
     def _set_state(self, new_state: AppState):
         """Update state and notify callback"""
         self._state = new_state
+        self._log_event(f"state:{new_state.value}")
         if self._state_callback:
             self._state_callback(new_state)
+
+    def _log_event(self, message: str) -> None:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = {
+            "ts": ts,
+            "message": message,
+            "state": self._state.value,
+            "recording": self.recording,
+            "processing": self._processing,
+            "starting": self._starting,
+        }
+        self._event_log.append(entry)
+        if os.environ.get("STT_DEBUG"):
+            print(f"[debug] {entry}")
         
     def start_recording(self):
         """Start recording audio from microphone"""
         with self._lock:
             if self._processing:
+                self._log_event("start_ignored_processing")
                 return
             if self.recording or self._starting:
+                self._log_event("start_ignored_busy")
                 return
             self._starting = True
             self.recording = True
             self._operation_start_time = time.time()
+            self._starting_since = self._operation_start_time
+            self._log_event("start_recording")
 
         self._set_state(AppState.RECORDING)
         self._overlay.show()
@@ -844,6 +911,7 @@ class STTApp:
         finally:
             with self._lock:
                 self._starting = False
+                self._starting_since = None
     
     def stop_recording(self):
         """Stop recording and return (wav_path, frames, rms)"""
@@ -864,6 +932,18 @@ class STTApp:
                     if not self._starting:
                         break
                 time.sleep(0.01)
+            with self._lock:
+                if self._starting:
+                    print("⚠️  Recording start still pending; restarting audio worker...")
+                    self._starting = False
+                    self._starting_since = None
+                    self._processing = False
+                    self._operation_start_time = None
+                    try:
+                        self._audio_worker.stop(force=True)
+                    except Exception:
+                        pass
+                    return None, 0, 0.0
 
         fd, wav_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -896,9 +976,13 @@ class STTApp:
                     self._set_state(AppState.IDLE)
                     self._overlay.hide()
                 self._operation_start_time = None
+                self._starting_since = None
+                self._processing_since = None
                 return
             self.recording = False
             self._operation_start_time = None
+            self._starting_since = None
+            self._processing_since = None
 
         self._set_state(AppState.IDLE)
         self._overlay.hide()
@@ -918,6 +1002,9 @@ class STTApp:
         with self._lock:
             if not self._processing:
                 return
+            self._processing = False
+            self._operation_start_time = None
+            self._processing_since = None
 
         cancel = getattr(self.provider, "cancel", None)
         if callable(cancel):
@@ -926,6 +1013,9 @@ class STTApp:
                 cancel()
             except Exception as e:
                 print(f"⚠️  Error cancelling transcription: {e}")
+        self._overlay.set_transcribing(False)
+        self._overlay.hide()
+        self._set_state(AppState.IDLE)
 
     def transcribe_audio(self, audio_file_path, timeout_s: int | None = None):
         """Transcribe audio using the configured provider with timeout protection"""
@@ -955,7 +1045,14 @@ class STTApp:
             status, payload = result_queue.get(timeout=timeout_s)
         except queue.Empty:
             print("❌ Transcription timed out at STTApp level")
+            self._log_event("app_timeout")
             # Try to cancel the provider if it supports cancellation
+            if hasattr(self.provider, "_last_error"):
+                try:
+                    self.provider._last_error = "app_timeout"
+                    self.provider._last_error_trace = None
+                except Exception:
+                    pass
             cancel = getattr(self.provider, "cancel", None)
             if callable(cancel):
                 try:
@@ -1036,8 +1133,14 @@ class STTApp:
         # Guard against concurrent processing calls
         with self._lock:
             if self._processing:
+                self._log_event("process_ignored_processing")
+                return
+            if self._starting:
+                self._log_event("process_aborted_starting")
+                self._force_reset_state_locked()
                 return
             self._processing = True
+            self._processing_since = time.time()
 
         wav_path = None
         try:
@@ -1075,6 +1178,7 @@ class STTApp:
             with self._lock:
                 self._processing = False
                 self._operation_start_time = None
+                self._processing_since = None
             # Hide overlay and reset state
             self._overlay.set_transcribing(False)
             self._overlay.hide()
@@ -1306,7 +1410,7 @@ def main():
         # Restore clipboard
         subprocess.run(["pbcopy"], input=old_clipboard, check=True, timeout=2)
 
-    def on_prompt_select(text):
+    def on_prompt_select(text, send_enter=False):
         def do_paste():
             # Delete the special char that Option+key produced
             backspace_script = '''
@@ -1317,6 +1421,15 @@ def main():
             subprocess.run(["osascript", "-e", backspace_script], timeout=2)
             time.sleep(0.03)
             paste_with_cgevent(text)
+            if send_enter:
+                time.sleep(0.05)
+                # Send Enter via CGEvent with no modifiers (bypasses held Option)
+                enter_down = CGEventCreateKeyboardEvent(None, 36, True)
+                CGEventSetFlags(enter_down, 0)
+                CGEventPost(kCGHIDEventTap, enter_down)
+                enter_up = CGEventCreateKeyboardEvent(None, 36, False)
+                CGEventSetFlags(enter_up, 0)
+                CGEventPost(kCGHIDEventTap, enter_up)
         threading.Thread(target=do_paste, daemon=True).start()
 
     prompt_overlay = PromptOverlay(on_select=on_prompt_select)
@@ -1369,7 +1482,7 @@ def main():
                     5: 'g', 4: 'h', 34: 'i', 38: 'j', 40: 'k', 37: 'l',
                     46: 'm', 45: 'n', 31: 'o', 35: 'p', 12: 'q', 15: 'r',
                     1: 's', 17: 't', 32: 'u', 9: 'v', 13: 'w', 7: 'x',
-                    16: 'y', 6: 'z',
+                    16: 'y', 6: 'z', 36: 'enter',
                 }
                 char = VK_TO_CHAR.get(key.vk)
                 if char and prompt_overlay.handle_key(char):

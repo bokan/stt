@@ -1,6 +1,6 @@
 """Prompt configuration for STT.
 
-Loads custom prompts from ~/.config/stt/prompts/*.md files.
+Loads custom prompts from ~/go/src/github.com/bokan/dotfiles/stt-prompts/*.md files.
 Falls back to built-in defaults if directory empty/missing.
 """
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-PROMPTS_DIR = Path.home() / ".config" / "stt" / "prompts"
+PROMPTS_DIR = Path.home() / "go" / "src" / "github.com" / "bokan" / "dotfiles" / "stt-prompts"
 
 
 @dataclass
@@ -17,6 +17,7 @@ class PromptItem:
     label: str
     text: str
     icon: str | None = None
+    enter: bool = False
 
 
 def _parse_frontmatter(content: str) -> tuple[dict, str]:
@@ -111,11 +112,15 @@ def load_prompts() -> list[PromptItem]:
         # Icon optional
         icon = metadata.get("icon")
 
+        # Enter flag - triggers on enter key
+        enter = metadata.get("enter", "").lower() == "true"
+
         prompts.append(PromptItem(
             key=str(key),
             label=label,
             text=body,
             icon=icon,
+            enter=enter,
         ))
 
     # Sort by key

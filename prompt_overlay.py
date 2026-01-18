@@ -110,7 +110,7 @@ class PromptOverlayView(NSView):
         if 0 <= index < len(self._prompts):
             prompt = self._prompts[index]
             if self._callback:
-                self._callback(prompt.text)
+                self._callback(prompt.text, prompt.enter)
 
     def drawRect_(self, rect):
         """Draw background and prompt items"""
@@ -264,11 +264,11 @@ class PromptOverlay:
 
         return NSMakeRect(x, y, OVERLAY_WIDTH, height)
 
-    def _handle_selection(self, text: str):
+    def _handle_selection(self, text: str, send_enter: bool = False):
         """Called when prompt selected"""
         self.hide()
         if self._on_select:
-            self._on_select(text)
+            self._on_select(text, send_enter)
 
     def reload_prompts(self):
         """Reload prompts from config"""
@@ -325,8 +325,13 @@ class PromptOverlay:
                 return False
 
         for prompt in self._prompts:
+            # Check enter flag for enter key
+            if char == "enter" and prompt.enter:
+                self._handle_selection(prompt.text, send_enter=True)
+                return True
+            # Check key match
             if prompt.key and prompt.key.lower() == char.lower():
-                self._handle_selection(prompt.text)
+                self._handle_selection(prompt.text, send_enter=prompt.enter)
                 return True
         return False
 
