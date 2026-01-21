@@ -38,7 +38,7 @@ source = "vcs"
 version-file = "_version.py"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parakeet_worker.py", "audio_worker.py", "postprocess.py", "overlay.py", "onboarding.py"]
+only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parakeet_worker.py", "audio_worker.py", "postprocess.py", "overlay.py", "onboarding.py", "prompt_overlay.py", "prompts_config.py"]
 
 [tool.hatch.build.targets.wheel.sources]
 "stt.py" = "stt.py"
@@ -50,3 +50,5 @@ only-include = ["stt.py", "providers.py", "menubar.py", "mlx_worker.py", "parake
 "postprocess.py" = "postprocess.py"
 "overlay.py" = "overlay.py"
 "onboarding.py" = "onboarding.py"
+"prompt_overlay.py" = "prompt_overlay.py"
+"prompts_config.py" = "prompts_config.py"
