@@ -999,7 +999,7 @@ class STTApp:
         print("Stopped")
 
         if starting:
-            deadline = time.time() + 1.0
+            deadline = time.time() + self._MAX_STARTING_TIME_S
             while time.time() < deadline:
                 with self._lock:
                     if not self._starting:
@@ -1218,9 +1218,8 @@ class STTApp:
                 self._log_event("process_ignored_processing")
                 return
             if self._starting:
-                self._log_event("process_aborted_starting")
-                self._force_reset_state_locked()
-                return
+                # Allow start to finish; stop_recording handles the pending-start case.
+                self._log_event("process_wait_starting")
             self._processing = True
             self._processing_since = time.time()
 
